@@ -5160,8 +5160,9 @@ switch_status_t config_sofia(sofia_config_t reload, char *profile_name)
 							} else if (!strcasecmp(val, "auto-nat")) {
 								ip = NULL;
 							} else {
-								ip = strcasecmp(val, "auto") ? val : mod_sofia_globals.guess_ip;
-								sofia_clear_pflag(profile, PFLAG_AUTO_NAT);
+								ip = val;
+							//	ip = strcasecmp(val, "auto") ? val : mod_sofia_globals.guess_ip;
+							//	sofia_clear_pflag(profile, PFLAG_AUTO_NAT);
 							}
 							if (ip) {
 								if (!strncasecmp(ip, "autonat:", 8)) {

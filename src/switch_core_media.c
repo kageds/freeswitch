@@ -10464,7 +10464,9 @@ SWITCH_DECLARE(void) switch_core_media_gen_local_sdp(switch_core_session_t *sess
 		switch_safe_free(buf);
 		return;
 	}
-
+	if (!ip && !zstr(smh->mparams->extsipip)) { 
+		ip = smh->mparams->extsipip;
+	}
 	if (!ip) {
 		if (!(ip = a_engine->adv_sdp_ip)) {
 			ip = a_engine->proxy_sdp_ip;
