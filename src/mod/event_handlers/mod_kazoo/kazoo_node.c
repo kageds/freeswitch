@@ -1148,7 +1148,7 @@ static switch_status_t handle_request_fetch_reply(ei_node_t *ei_node, erlang_pid
 	}
 
 	if (result == SWITCH_STATUS_SUCCESS) {
-		switch_safe_free(xml_str);
+//		switch_safe_free(xml_str);
 
 		return erlang_response_ok(rbuf);
 	} else {
@@ -1229,10 +1229,16 @@ static switch_status_t handle_kazoo_request(ei_node_t *ei_node, erlang_pid *pid,
 static switch_status_t handle_mod_kazoo_request(ei_node_t *ei_node, erlang_msg *msg, ei_x_buff *buf) {
 	char atom[MAXATOMLEN + 1];
 	int version, type, size, arity;
+	int length = 0;
 
 	buf->index = 0;
+	ei_print_term(stdout, buf->buff, &buf->index);
+	buf->index = 0;
+
 	ei_decode_version(buf->buff, &buf->index, &version);
 	ei_get_type(buf->buff, &buf->index, &type, &size);
+
+
 
 	/* is_tuple(Type) */
 	if (type != ERL_SMALL_TUPLE_EXT) {
@@ -1282,16 +1288,43 @@ static switch_status_t handle_mod_kazoo_request(ei_node_t *ei_node, erlang_msg *
 		}
 
 		/* ...ref()}, {_, _}} = Buf */
-		if (ei_decode_ref(buf->buff, &buf->index, &ref)) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Received erlang call without a reply tag (ensure you are using Kazoo v2.14+).\n");
-			ei_x_free(&send_msg->buf);
-			switch_safe_free(send_msg);
-			return SWITCH_STATUS_GENERR;
-		}
+                ei_get_type(buf->buff, &buf->index, &type, &size);
+                switch (type) {
+                case ERL_NEW_REFERENCE_EXT:
+                        if (ei_decode_ref(buf->buff, &buf->index, &ref)) {
+                        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to decode erlang ref of the net_kernel tuple second element\n");
+                        ei_x_free(&send_msg->buf);
+                        switch_safe_free(send_msg);
+                        return SWITCH_STATUS_GENERR;
+                }
+                break;
+                case ERL_LIST_EXT:
+                        if (ei_decode_list_header(buf->buff, &buf->index, &length) || length != 1) {
+                                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to decode erlang ref list [length : %d] of the net_kernel tuple second element\n", length);
+                                ei_x_free(&send_msg->buf);
+                                switch_safe_free(send_msg);
+                                return SWITCH_STATUS_GENERR;
+                        }
+                        if (ei_decode_atom_safe(buf->buff, &buf->index, atom) || strncmp(atom, "alias", 4)) {
+                                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Received net_kernel message list does not begin with the atom 'alias'\n");
+                                ei_x_free(&send_msg->buf);
+                                switch_safe_free(send_msg);
+                                return SWITCH_STATUS_GENERR;
+                        }
+                        if (ei_decode_ref(buf->buff, &buf->index, &ref)) {
+                                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to decode erlang ref of the net_kernel tuple second element\n");
+                                ei_x_free(&send_msg->buf);
+                                switch_safe_free(send_msg);
+                                return SWITCH_STATUS_GENERR;
+                        }
+                        break;
+                }
 
-		/* send_msg->buf = {ref(), ... */
+		/* send_msg->buf = {['alias'|ref()], ... */
 		ei_x_encode_tuple_header(&send_msg->buf, 2);
-		ei_x_encode_ref(&send_msg->buf, &ref);
+        	ei_x_encode_list_header(&send_msg->buf, 1);
+        	ei_x_encode_atom(&send_msg->buf, "alias");
+        	ei_x_encode_ref(&send_msg->buf, &ref);
 
 		status = handle_kazoo_request(ei_node, &msg->from, buf, &send_msg->buf);
 
@@ -1314,6 +1347,8 @@ static switch_status_t handle_net_kernel_request(ei_node_t *ei_node, erlang_msg 
 	char atom[MAXATOMLEN + 1];
 	ei_send_msg_t *send_msg = NULL;
 	erlang_ref ref;
+	int length = 0;
+
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Received net_kernel message, attempting to reply\n");
 
@@ -1361,10 +1396,35 @@ static switch_status_t handle_net_kernel_request(ei_node_t *ei_node, erlang_msg 
 	}
 
 	/* {Pid, Ref}=Sender */
-	if (ei_decode_pid(buf->buff, &buf->index, &send_msg->pid) || ei_decode_ref(buf->buff, &buf->index, &ref)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to decode erlang pid or ref of the net_kernel tuple second element\n");
+	/* OTP-24+ {'$gen_call', {<ecallmgr@hello.com.17998.4>, [alias | #Ref<167022.-1742667775.1372635947>]}, {is_auth, 'ecallmgr@hello.com'}} */
+	if (ei_decode_pid(buf->buff, &buf->index, &send_msg->pid)) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to decode erlang pid of the net_kernel tuple second element\n");
 		goto error;
 	}
+	ei_get_type(buf->buff, &buf->index, &type, &size);
+	switch (type) {
+		case ERL_NEW_REFERENCE_EXT:
+			if (ei_decode_ref(buf->buff, &buf->index, &ref)) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to decode erlang ref of the net_kernel tuple second element\n");
+				goto error;
+			}
+			break;
+		case ERL_LIST_EXT:
+			if (ei_decode_list_header(buf->buff, &buf->index, &length) || length != 1) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to decode erlang ref list [length : %d] of the net_kernel tuple second element\n", length);
+				goto error;
+			}
+                	if (ei_decode_atom_safe(buf->buff, &buf->index, atom) || strncmp(atom, "alias", 4)) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Received net_kernel message list does not begin with the atom 'alias'\n");
+				goto error;
+                	}
+                        if (ei_decode_ref(buf->buff, &buf->index, &ref)) {
+                                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to decode erlang ref of the net_kernel tuple second element\n");
+                                goto error;
+                        }
+			break;
+	}
+
 
 	ei_get_type(buf->buff, &buf->index, &type, &size);
 
@@ -1388,8 +1448,10 @@ static switch_status_t handle_net_kernel_request(ei_node_t *ei_node, erlang_msg 
 		goto error;
 	}
 
-	/* To ! {Tag, Reply} */
+	/* To ! {['alias'|Tag], Reply} */
 	ei_x_encode_tuple_header(&send_msg->buf, 2);
+	ei_x_encode_list_header(&send_msg->buf, 1); 
+ 	ei_x_encode_atom(&send_msg->buf, "alias");
 	ei_x_encode_ref(&send_msg->buf, &ref);
 	ei_x_encode_atom(&send_msg->buf, "yes");
 
