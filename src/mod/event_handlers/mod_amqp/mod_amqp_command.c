@@ -1,343 +1,322 @@
 /*
-* FreeSWITCH Modular Media Switching Software Library / Soft-Switch Application
-* Copyright (C) 2005-2012, Anthony Minessale II <anthm@freeswitch.org>
-*
-* Version: MPL 1.1
-*
-* The contents of this file are subject to the Mozilla Public License Version
-* 1.1 (the "License"); you may not use this file except in compliance with
-* the License. You may obtain a copy of the License at
-* http://www.mozilla.org/MPL/
-*
-* Software distributed under the License is distributed on an "AS IS" basis,
-* WITHOUT WARRANTY OF ANY KIND, either express or implied. See the License
-* for the specific language governing rights and limitations under the
-* License.
-*
-* The Original Code is FreeSWITCH Modular Media Switching Software Library / Soft-Switch Application
-*
-* The Initial Developer of the Original Code is
-* Anthony Minessale II <anthm@freeswitch.org>
-* Portions created by the Initial Developer are Copyright (C)
-* the Initial Developer. All Rights Reserved.
-*
-* Based on mod_skel by
-* Anthony Minessale II <anthm@freeswitch.org>
-*
-* Contributor(s):
-*
-* Daniel Bryars <danb@aeriandi.com>
-* Tim Brown <tim.brown@aeriandi.com>
-* Anthony Minessale II <anthm@freeswitch.org>
-* William King <william.king@quentustech.com>
-* Mike Jerris <mike@jerris.com>
-*
-* mod_amqp.c -- Sends FreeSWITCH events to an AMQP broker
-*
-*/
+ * FreeSWITCH Modular Media Switching Software Library / Soft-Switch Application
+ * Copyright (C) 2005-2012, Anthony Minessale II <anthm@freeswitch.org>
+ *
+ * Version: MPL 1.1
+ *
+ * The contents of this file are subject to the Mozilla Public License Version
+ * 1.1 (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ * http://www.mozilla.org/MPL/
+ *
+ * Software distributed under the License is distributed on an "AS IS" basis,
+ * WITHOUT WARRANTY OF ANY KIND, either express or implied. See the License
+ * for the specific language governing rights and limitations under the
+ * License.
+ *
+ * The Original Code is FreeSWITCH Modular Media Switching Software Library / Soft-Switch Application
+ *
+ * The Initial Developer of the Original Code is
+ * Anthony Minessale II <anthm@freeswitch.org>
+ * Portions created by the Initial Developer are Copyright (C)
+ * the Initial Developer. All Rights Reserved.
+ *
+ * Based on mod_skel by
+ * Anthony Minessale II <anthm@freeswitch.org>
+ *
+ * Contributor(s):
+ *
+ * Daniel Bryars <danb@aeriandi.com>
+ * Tim Brown <tim.brown@aeriandi.com>
+ * Anthony Minessale II <anthm@freeswitch.org>
+ * William King <william.king@quentustech.com>
+ * Mike Jerris <mike@jerris.com>
+ *
+ * mod_amqp.c -- Sends FreeSWITCH events to an AMQP broker
+ *
+ */
 
+#include "mod_amqp_command.h"
 #include "mod_amqp.h"
+#include <switch.h>
 
-switch_status_t mod_amqp_command_destroy(mod_amqp_command_profile_t **prof)
-{
-	switch_status_t ret;
-	mod_amqp_connection_t *conn = NULL, *conn_next = NULL;
-	switch_memory_pool_t *pool;
-	mod_amqp_command_profile_t *profile;
-
-	if (!prof || !*prof) {
-		return SWITCH_STATUS_SUCCESS;
-	}
-
-	profile = *prof;
-	pool = profile->pool;
-
-	if (profile->name) {
-		switch_core_hash_delete(mod_amqp_globals.command_hash, profile->name);
-	}
-
-	profile->running = 0;
-
-	if (profile->command_thread) {
-		switch_thread_join(&ret, profile->command_thread);
-	}
-
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "Profile[%s] closing AMQP socket...\n", profile->name);
-
-	for (conn = profile->conn_root; conn; conn = conn_next) {
-		mod_amqp_connection_destroy(&conn);
-	}
-
-	profile->conn_active = NULL;
-	profile->conn_root = NULL;
-
-	if (pool) {
-		switch_core_destroy_memory_pool(&pool);
-	}
-
-	*prof = NULL;
-
-	return SWITCH_STATUS_SUCCESS;
-}
+const char *lookup_value(const char *key);
+void process_value(const char *input, char *output, size_t output_size);
 
 
-static char *mod_amqp_expand_header(switch_memory_pool_t *pool, switch_event_t *event, char *val)
-{
-        char *expanded;
-        char *dup = NULL;
+static void add_props_headers(cJSON *response, mod_amqp_json_props_t json_props) {
+	for (int i = 0; i < json_props.size && json_props.prop[i] != NULL; i++) {
+		char key[256], value[256];
 
-        expanded = switch_event_expand_headers(event, val);
-        dup = switch_core_strdup(pool, expanded);
+		// Extract key and value from "key=value" format
+		if (sscanf(json_props.prop[i], "%255[^=]=%255s", key, value) == 2) {
+			char final_key[256], final_value[256];
 
-        if (expanded != val) {
-                free(expanded);
-        }
-
-        return dup;
-}
-
-
-switch_status_t mod_amqp_command_create(char *name, switch_xml_t cfg)
-{
-	mod_amqp_command_profile_t *profile = NULL;
-	switch_xml_t params, param, connections, connection;
-	switch_threadattr_t *thd_attr = NULL;
-	switch_memory_pool_t *pool;
-	switch_event_t *event;
-	char *exchange = NULL, *binding_key = NULL, *queue = NULL;
-
-	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
-		goto err;
-	}
-
-	profile = switch_core_alloc(pool, sizeof(mod_amqp_command_profile_t));
-
-	profile->pool = pool;
-	profile->name = switch_core_strdup(profile->pool, name);
-	profile->running = 1;
-	profile->reconnect_interval_ms = 1000;
-
-        if (switch_event_create(&event, SWITCH_EVENT_GENERAL) != SWITCH_STATUS_SUCCESS) {
-                goto err;
-	}
-
-	/* Default queue properties, set to match formerly hardcoded values */
-	profile->passive = SWITCH_FALSE;
-	profile->durable = SWITCH_FALSE;
-	profile->exclusive = SWITCH_FALSE;
-	profile->auto_delete = SWITCH_TRUE;
-
-	if ((params = switch_xml_child(cfg, "params")) != NULL) {
-		for (param = switch_xml_child(params, "param"); param; param = param->next) {
-			char *var = (char *) switch_xml_attr_soft(param, "name");
-			char *val = (char *) switch_xml_attr_soft(param, "value");
-
-			if (!var) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] param missing 'name' attribute\n", profile->name);
-				continue;
-			}
-
-			if (!val) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] param[%s] missing 'value' attribute\n", profile->name, var);
-				continue;
-			}
-
-			if (!strncmp(var, "reconnect_interval_ms", 21)) {
-				int interval = atoi(val);
-				if ( interval && interval > 0 ) {
-					profile->reconnect_interval_ms = interval;
-				}
-			} else if (!strncmp(var, "exchange-name", 13)) {
-				exchange = mod_amqp_expand_header(profile->pool, event, val);
-			} else if (!strncmp(var, "queue-name", 10)) {
-				queue = mod_amqp_expand_header(profile->pool, event, val);
-			} else if (!strncmp(var, "binding_key", 11)) {
-				binding_key = mod_amqp_expand_header(profile->pool, event, val);
-			} else if (!strncmp(var, "queue-passive", 13)) {
-				profile->passive = switch_true(val);
-			} else if (!strncmp(var, "queue-durable", 13)) {
-				profile->durable = switch_true(val);
-			} else if (!strncmp(var, "queue-exclusive", 15)) {
-				profile->exclusive = switch_true(val);
-			} else if (!strncmp(var, "queue-auto-delete", 17)) {
-				profile->auto_delete = switch_true(val);
-			}
-		}
-	}
-
-        switch_event_destroy(&event);
-
-	/* Handle defaults of string types */
-	profile->exchange = exchange ? exchange : switch_core_strdup(profile->pool, "TAP.Commands");
-	profile->queue = queue ? queue : NULL;
-	profile->binding_key = binding_key ? binding_key : switch_core_strdup(profile->pool, "commandBindingKey");
-
-	if ((connections = switch_xml_child(cfg, "connections")) != NULL) {
-		for (connection = switch_xml_child(connections, "connection"); connection; connection = connection->next) {
-			if ( ! profile->conn_root ) { /* Handle first root node */
-				if (mod_amqp_connection_create(&(profile->conn_root), connection, profile->pool) != SWITCH_STATUS_SUCCESS) {
-					/* Handle connection create failure */
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Profile[%s] failed to create connection\n", profile->name);
-					continue;
-				}
-				profile->conn_active = profile->conn_root;
+			// If key starts with '#', strip it and use literal, otherwise look it up
+			if (key[0] == '#') {
+				strcpy(final_key, key + 1);
 			} else {
-				if (mod_amqp_connection_create(&(profile->conn_active->next), connection, profile->pool) != SWITCH_STATUS_SUCCESS) {
-					/* Handle connection create failure */
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Profile[%s] failed to create connection\n", profile->name);
-					continue;
-				}
-				profile->conn_active = profile->conn_active->next;
+				strcpy(final_key, lookup_value(key));
 			}
+
+			// Process value, handling literals, lookup, and concatenation
+			process_value(value, final_value, sizeof(final_value));
+
+			cJSON_AddStringToObject(response, final_key, final_value);
 		}
 	}
-	profile->conn_active = NULL;
-	/* We are not going to open the command queue connection on create, but instead wait for the running thread to open it */
 
-	/* Start the worker threads */
-	switch_threadattr_create(&thd_attr, profile->pool);
-	switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+}
 
-	if (switch_thread_create(&profile->command_thread, thd_attr, mod_amqp_command_thread, profile, profile->pool)) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Cannot create 'amqp event sender' thread!\n");
-		goto err;
-	}
+static switch_status_t execute_command(const char *cmd, const char *args, mod_amqp_json_props_t json_props,
+									   switch_core_session_t *session, amqp_connection_state_t connection, int channel,
+									   const char *reply_to, char *correlation_id)
+{
+	switch_stream_handle_t stream = {0};
+	amqp_basic_properties_t props = {0};
+	char *json_str;
+	cJSON *response;
 
-	if ( switch_core_hash_insert(mod_amqp_globals.command_hash, name, (void *) profile) != SWITCH_STATUS_SUCCESS) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to insert new profile [%s] into mod_amqp profile hash\n", name);
-		goto err;
-	}
+	SWITCH_STANDARD_STREAM(stream);
+	switch_api_execute(cmd, args, session, &stream);
 
+	response = cJSON_CreateObject();
+	cJSON_AddStringToObject(response, "response", (char *)stream.data);
+	add_props_headers(response, json_props);
+	cJSON_AddStringToObject(response, "Msg-ID", correlation_id);
+	json_str = cJSON_PrintUnformatted(response);
+
+	props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG | AMQP_BASIC_CORRELATION_ID_FLAG;
+	props.content_type = amqp_cstring_bytes("application/json");
+	props.correlation_id = amqp_cstring_bytes(correlation_id);
+
+	amqp_basic_publish(connection, channel, amqp_empty_bytes, amqp_cstring_bytes(reply_to), 0, 0, &props,
+					   amqp_cstring_bytes(json_str));
+
+	switch_safe_free(stream.data);
+	cJSON_Delete(response);
+	free(json_str);
+	switch_safe_free(correlation_id);
 	return SWITCH_STATUS_SUCCESS;
-
- err:
-	/* Cleanup */
-	mod_amqp_command_destroy(&profile);
-	return SWITCH_STATUS_GENERR;
 }
 
-static void mod_amqp_command_response(mod_amqp_command_profile_t *profile, char *command, switch_stream_handle_t stream,
-									  char *fs_resp_exchange, char *fs_resp_key, switch_status_t status)
-{
-	char *json_output = NULL;
-	amqp_basic_properties_t props;
-	cJSON *message = NULL;
-	int amqp_status = AMQP_STATUS_OK;
+static switch_status_t build_event(switch_event_t *event, cJSON *headers) {
+	cJSON *item = NULL;
+	char *key, *value;
 
-	if (! profile->conn_active) {
-		/* No connection, so we can not send the message. */
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] not active\n", profile->name);
-		return;
+	if(!event) {
+		return SWITCH_STATUS_FALSE;
 	}
 
-	/* Construct the api response */
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Preparing api command response: [%s]\n", (char *)stream.data);
-	message = cJSON_CreateObject();
-
-	cJSON_AddItemToObject(message, "output", cJSON_CreateString((const char *) stream.data));
-	cJSON_AddItemToObject(message, "command", cJSON_CreateString(command));
-	cJSON_AddItemToObject(message, "status", cJSON_CreateNumber((double) status));
-
-	json_output = cJSON_Print(message);
-	cJSON_Delete(message);
-
-	memset(&props, 0, sizeof(amqp_basic_properties_t));
-
-	props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG;
-	props.content_type = amqp_cstring_bytes("text/json");
-
-	amqp_status = amqp_basic_publish(
-								profile->conn_active->state,
-								1,
-								amqp_cstring_bytes(fs_resp_exchange),
-								amqp_cstring_bytes(fs_resp_key),
-								0,
-								0,
-								&props,
-								amqp_cstring_bytes(json_output));
-
-	switch_safe_free(json_output);
-
-	if (amqp_status != AMQP_STATUS_OK) {
-		const char *errstr = amqp_error_string2(-amqp_status);
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] failed to send event on connection[%s]: %s\n",
-						  profile->name, profile->conn_active->name, errstr);
-
-		/* This is bad, we couldn't send the message. Clear up any connection */
-		mod_amqp_connection_close(profile->conn_active);
-		profile->conn_active = NULL;
-		return;
+    // Iterate over all key-value pairs
+    cJSON_ArrayForEach(item, headers) {
+		key = item->string;
+		value = item->valuestring;
+		if (!strcmp(key, "body")) {
+			switch_safe_free(event->body);
+			event->body = value;
+		} else	{
+			if(!strcasecmp(key, "Call-ID")) {
+				switch_core_session_t *session = NULL;
+				if(!zstr(value)) {
+					if ((session = switch_core_session_locate(value)) != NULL) {
+						switch_channel_t *channel = switch_core_session_get_channel(session);
+						switch_channel_event_set_data(channel, event);
+						switch_core_session_rwunlock(session);
+					}
+				}
+			}
+			switch_event_add_header_string_nodup(event, SWITCH_STACK_BOTTOM, key, value);
+		}
 	}
-
-	return;
+	return SWITCH_STATUS_SUCCESS;
 }
 
-void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void *data)
-{
-	amqp_bytes_t queueName = { 0, NULL };
-	mod_amqp_command_profile_t *profile = (mod_amqp_command_profile_t *) data;
 
+static switch_status_t response_ok(mod_amqp_json_props_t json_props, switch_core_session_t *session,
+							amqp_connection_state_t connection, int channel, const char *reply_to, char *correlation_id)
+{
+	amqp_basic_properties_t props = {0};
+	char *json_str;
+	cJSON *response;
+
+	response = cJSON_CreateObject();
+	cJSON_AddStringToObject(response, "response", "ok");
+	add_props_headers(response, json_props);
+	cJSON_AddStringToObject(response, "Msg-ID", correlation_id);
+	json_str = cJSON_PrintUnformatted(response);
+
+	props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG | AMQP_BASIC_CORRELATION_ID_FLAG;
+	props.content_type = amqp_cstring_bytes("application/json");
+	props.correlation_id = amqp_cstring_bytes(correlation_id);
+
+	amqp_basic_publish(connection, channel, amqp_empty_bytes, amqp_cstring_bytes(reply_to), 0, 0, &props,
+					   amqp_cstring_bytes(json_str));
+
+	cJSON_Delete(response);
+	free(json_str);
+	switch_safe_free(correlation_id);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t response_baduuid(mod_amqp_json_props_t json_props, switch_core_session_t *session,
+							amqp_connection_state_t connection, int channel, const char *reply_to, char *correlation_id)
+{
+	amqp_basic_properties_t props = {0};
+	char *json_str;
+	cJSON *response;
+
+	response = cJSON_CreateObject();
+	cJSON_AddStringToObject(response, "response", "baduuid");
+	add_props_headers(response, json_props);
+	cJSON_AddStringToObject(response, "Msg-ID", correlation_id);
+	json_str = cJSON_PrintUnformatted(response);
+
+	props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG | AMQP_BASIC_CORRELATION_ID_FLAG;
+	props.content_type = amqp_cstring_bytes("application/json");
+	props.correlation_id = amqp_cstring_bytes(correlation_id);
+
+	amqp_basic_publish(connection, channel, amqp_empty_bytes, amqp_cstring_bytes(reply_to), 0, 0, &props,
+					   amqp_cstring_bytes(json_str));
+
+	cJSON_Delete(response);
+	free(json_str);
+	switch_safe_free(correlation_id);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t response_badarg(mod_amqp_json_props_t json_props, switch_core_session_t *session,
+							amqp_connection_state_t connection, int channel, const char *reply_to, char *correlation_id)
+{
+	amqp_basic_properties_t props = {0};
+	char *json_str;
+	cJSON *response;
+
+	response = cJSON_CreateObject();
+	cJSON_AddStringToObject(response, "response", "badarg");
+	add_props_headers(response, json_props);
+	cJSON_AddStringToObject(response, "Msg-ID", correlation_id);
+	json_str = cJSON_PrintUnformatted(response);
+
+	props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG | AMQP_BASIC_CORRELATION_ID_FLAG;
+	props.content_type = amqp_cstring_bytes("application/json");
+	props.correlation_id = amqp_cstring_bytes(correlation_id);
+
+	amqp_basic_publish(connection, channel, amqp_empty_bytes, amqp_cstring_bytes(reply_to), 0, 0, &props,
+					   amqp_cstring_bytes(json_str));
+
+	cJSON_Delete(response);
+	free(json_str);
+	switch_safe_free(correlation_id);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static switch_status_t pong(mod_amqp_json_props_t json_props, switch_core_session_t *session,
+							amqp_connection_state_t connection, int channel, const char *reply_to, char *correlation_id)
+{
+	amqp_basic_properties_t props = {0};
+	char *json_str;
+	cJSON *response;
+
+	response = cJSON_CreateObject();
+	cJSON_AddStringToObject(response, "pong", "01234567890");
+	add_props_headers(response, json_props);
+	cJSON_AddStringToObject(response, "Msg-ID", correlation_id);
+
+	json_str = cJSON_PrintUnformatted(response);
+
+	props._flags = AMQP_BASIC_CONTENT_TYPE_FLAG | AMQP_BASIC_CORRELATION_ID_FLAG;
+	props.content_type = amqp_cstring_bytes("application/json");
+	props.correlation_id = amqp_cstring_bytes(correlation_id);
+
+	amqp_basic_publish(connection, channel, amqp_empty_bytes, amqp_cstring_bytes(reply_to), 0, 0, &props,
+					   amqp_cstring_bytes(json_str));
+
+	cJSON_Delete(response);
+	free(json_str);
+	switch_safe_free(correlation_id);
+	return SWITCH_STATUS_SUCCESS;
+}
+
+static void *SWITCH_THREAD_FUNC command_thread(switch_thread_t *thread, void *data)
+{
+	mod_amqp_command_profile_t *profile = (mod_amqp_command_profile_t *)data;
+	switch_status_t status = SWITCH_STATUS_SUCCESS;
+	amqp_boolean_t passive = 0;
+
+	amqp_bytes_t queueName;
+	amqp_queue_declare_ok_t *recv_queue;
+	struct timeval timeout = {0, 100000}; // 100ms timeout
+	amqp_envelope_t envelope;
+	amqp_rpc_reply_t result;
+	char *routing_key, *message, *correlation_id;
+	char *last_field;
+	cJSON *command;
+	switch_core_session_t *session = NULL;
+	switch_event_t *event = NULL;
+	
+
+	const char *reply_to;
+
+	//FIXME - needs a more general solution
+	char nodename[1024];
+    sprintf(nodename, "freeswitch@%s", mod_amqp_globals.hostname);
 	while (profile->running) {
-		amqp_queue_declare_ok_t *recv_queue;
 
 		/* Ensure we have an AMQP connection */
-		if (!profile->conn_active) {
+		if (!profile->conn_active->state) {
 			switch_status_t status;
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Amqp no connection- reconnecting...\n");
 
-			status = mod_amqp_connection_open(profile->conn_root, &(profile->conn_active), profile->name, profile->custom_attr);
-			if ( status	!= SWITCH_STATUS_SUCCESS ) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Profile[%s] failed to connect with code(%d), sleeping for %dms\n",
-								  profile->name, status, profile->reconnect_interval_ms);
+			status = mod_amqp_connection_open(profile->conn_root, &(profile->conn_active), profile->name,
+											  profile->custom_attr);
+			if (status != SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+								  "Profile[%s] failed to connect with code(%d), sleeping for %dms\n", profile->name,
+								  status, profile->reconnect_interval_ms);
 				switch_sleep(profile->reconnect_interval_ms * 1000);
 				continue;
 			}
 
 			/* Check if exchange already exists */
 #if AMQP_VERSION_MAJOR == 0 && AMQP_VERSION_MINOR >= 6
- 			amqp_exchange_declare(profile->conn_active->state, 1,
-								  amqp_cstring_bytes(profile->exchange),
-								  amqp_cstring_bytes("topic"),
-								  0, /* passive */
-								  1, /* durable */
-								  0, /* auto-delete */
-								  0,
-								  amqp_empty_table);
+			amqp_exchange_declare(profile->conn_active->state, 1, amqp_cstring_bytes(profile->exchange),
+								  amqp_cstring_bytes("topic"), 0, /* passive */
+								  profile->durable,				  /* durable */
+								  0,							  /* auto-delete */
+								  0, amqp_empty_table);
 #else
-			amqp_exchange_declare(profile->conn_active->state, 1,
-								  amqp_cstring_bytes(profile->exchange),
-								  amqp_cstring_bytes("topic"),
-								  0, /* passive */
-								  1, /* durable */
+			amqp_exchange_declare(profile->conn_active->state, 1, amqp_cstring_bytes(profile->exchange),
+								  amqp_cstring_bytes("topic"), 0, /* passive */
+								  profile->durable,				  /* durable */
 								  amqp_empty_table);
 #endif
 
-			if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state), "Checking for command exchange\n")) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Profile[%s] failed to create missing command exchange\n", profile->name);
+			if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state),
+										   "Checking for command exchange\n")) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+								  "Profile[%s] failed to create missing command exchange\n", profile->name);
 				continue;
 			}
 
 			/* Ensure we have a queue */
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Creating command queue\n");
-			recv_queue = amqp_queue_declare(profile->conn_active->state, // state
-											1,                           // channel
-											profile->queue ? amqp_cstring_bytes(profile->queue) : amqp_empty_bytes, // queue name
-											profile->passive,
-											profile->durable,
-											profile->exclusive,
-											profile->auto_delete,
-											amqp_empty_table);           // args
+			recv_queue =
+				amqp_queue_declare(profile->conn_active->state,		  // state
+								   1,								  // channel
+								   amqp_cstring_bytes(profile->name), // queue name
+								   profile->passive, profile->durable, profile->exclusive, profile->auto_delete,
+								   amqp_empty_table); // args
 
 			if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state), "Declaring queue\n")) {
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Profile[%s] failed to connect with code(%d), sleeping for %dms\n",
-								  profile->name, status, profile->reconnect_interval_ms);
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+								  "Profile[%s] failed to connect with code(%d), sleeping for %dms\n", profile->name,
+								  status, profile->reconnect_interval_ms);
 				switch_sleep(profile->reconnect_interval_ms * 1000);
 				continue;
 			}
 
-			if (queueName.bytes) {
-				amqp_bytes_free(queueName);
-			}
+			//			if (queueName.bytes) { amqp_bytes_free(queueName); }
 
 			queueName = amqp_bytes_malloc_dup(recv_queue->queue);
 
@@ -346,16 +325,18 @@ void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void 
 				break;
 			}
 
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Created command queue %.*s\n", (int)queueName.len, (char *)queueName.bytes);
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Binding command queue to exchange %s\n", profile->exchange);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Created command queue %.*s\n", (int)queueName.len,
+							  (char *)queueName.bytes);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Binding command queue to exchange %s\n",
+							  profile->exchange);
 
 			/* Bind the queue to the exchange */
-			amqp_queue_bind(profile->conn_active->state,                   // state
-							1,                                             // channel
-							queueName,                                     // queue
-							amqp_cstring_bytes(profile->exchange),         // exchange
-							amqp_cstring_bytes(profile->binding_key),      // routing key
-							amqp_empty_table);                             // args
+			amqp_queue_bind(profile->conn_active->state,			  // state
+							1,										  // channel
+							queueName,								  // queue
+							amqp_cstring_bytes(profile->exchange),	  // exchange
+							amqp_cstring_bytes(profile->binding_key), // routing key
+							amqp_empty_table);						  // args
 
 			if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state), "Binding queue")) {
 				mod_amqp_connection_close(profile->conn_active);
@@ -368,151 +349,341 @@ void * SWITCH_THREAD_FUNC mod_amqp_command_thread(switch_thread_t *thread, void 
 			continue;
 		}
 
-		// Start a command
-		amqp_basic_consume(profile->conn_active->state,     // state
-						   1,                               // channel
-						   queueName,                       // queue
-						   amqp_empty_bytes,                // command tag
-						   0, 1, 0,                         // no_local, no_ack, exclusive
-						   amqp_empty_table);               // args
-
-		if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state), "Creating a command")) {
-			mod_amqp_connection_close(profile->conn_active);
-			profile->conn_active = NULL;
-			switch_sleep(profile->reconnect_interval_ms * 1000);
-			continue;
+		if (!profile->conn_active || !profile->conn_active->state) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "No active connection\n");
+			return NULL;
 		}
 
-		while (profile->running && profile->conn_active) {
-			amqp_rpc_reply_t res;
-			amqp_envelope_t envelope;
-			struct timeval timeout = {0};
-			char command[10240];
-			enum ECommandFormat {
-				COMMAND_FORMAT_UNKNOWN,
-				COMMAND_FORMAT_PLAINTEXT
-			} commandFormat = COMMAND_FORMAT_PLAINTEXT;
-			char *fs_resp_exchange = NULL, *fs_resp_key = NULL;
+		// Bind queue to exchange if exchange is specified
+		if (profile->exchange) {
+			amqp_queue_bind(profile->conn_active->state,
+							1, // channel
+							queueName, amqp_cstring_bytes(profile->exchange),
+							amqp_cstring_bytes(profile->name), // use profile name as routing key
+							amqp_empty_table);
+		}
 
-			amqp_maybe_release_buffers(profile->conn_active->state);
+		// Start consuming
+		amqp_basic_consume(profile->conn_active->state,
+						   1, // channel
+						   queueName, amqp_empty_bytes,
+						   0, // no_local
+						   1, // no_ack
+						   0, // exclusive
+						   amqp_empty_table);
 
-			timeout.tv_usec = 500 * 1000;
-			res = amqp_consume_message(profile->conn_active->state, &envelope, &timeout, 0);
+		amqp_maybe_release_buffers(profile->conn_active->state);
 
-			if (res.reply_type == AMQP_RESPONSE_LIBRARY_EXCEPTION) {
-				if (res.library_error == AMQP_STATUS_UNEXPECTED_STATE) {
-					/* Unexpected frame. Discard it then continue */
-					amqp_frame_t decoded_frame;
-					amqp_simple_wait_frame(profile->conn_active->state, &decoded_frame);
-				}
+		result = amqp_consume_message(profile->conn_active->state, &envelope, &timeout, 0);
 
-				if (res.library_error == AMQP_STATUS_SOCKET_ERROR) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "A socket error occurred. Tearing down and reconnecting\n");
-					break;
-				}
+		if (result.reply_type == AMQP_RESPONSE_NORMAL) {
 
-				if (res.library_error == AMQP_STATUS_CONNECTION_CLOSED) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "AMQP connection was closed. Tearing down and reconnecting\n");
-					break;
-				}
+			switch_malloc(routing_key, sizeof(char) * envelope.routing_key.len + 1);
+			memcpy(routing_key, envelope.routing_key.bytes, envelope.routing_key.len);
+			routing_key[envelope.routing_key.len] = '\0';
 
-				if (res.library_error == AMQP_STATUS_TCP_ERROR) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "A TCP error occurred. Tearing down and reconnecting\n");
-					break;
-				}
+			switch_malloc(message, sizeof(char) * envelope.message.body.len + 1);
+			memcpy(message, envelope.message.body.bytes, envelope.message.body.len);
+			message[envelope.message.body.len] = '\0';
 
-				if (res.library_error == AMQP_STATUS_TIMEOUT) {
-					// nop
-				}
+			command = cJSON_Parse(message);
 
-				/* Try consuming again */
-				continue;
-			}
+			last_field = strrchr(routing_key, '.');
 
-			if (res.reply_type != AMQP_RESPONSE_NORMAL) {
-				break;
-			}
+			reply_to = (char *)envelope.message.properties.reply_to.bytes;
+			switch_malloc(correlation_id, sizeof(char) * envelope.message.properties.correlation_id.len + 1);
+			memcpy(correlation_id, envelope.message.properties.correlation_id.bytes,
+						   envelope.message.properties.correlation_id.len);
+			correlation_id[envelope.message.properties.correlation_id.len] = '\0';
 
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Delivery:%u, exchange:%.*s routingkey:%.*s\n",
-							  (unsigned) envelope.delivery_tag, (int) envelope.exchange.len, (char *) envelope.exchange.bytes,
-							  (int) envelope.routing_key.len, (char *) envelope.routing_key.bytes);
+			if (command && last_field) {
+				last_field++; // Move past the dot
+				// Check if the last field is either "api" or "ping"
+				if (!strcmp(last_field, "api") || !strcmp(last_field, "bgapi")) {
+					cJSON *cmd_obj = cJSON_GetObjectItem(command, "command");
+					cJSON *args_obj = cJSON_GetObjectItem(command, "args");
+					cJSON *nodename_obj = cJSON_GetObjectItem(command, "Switch-Nodename");
+					const char *nodename_str;
 
-			if (envelope.message.properties._flags & AMQP_BASIC_CONTENT_TYPE_FLAG) {
-
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Content-type: %.*s\n",
-								  (int) envelope.message.properties.content_type.len, (char *) envelope.message.properties.content_type.bytes);
-
-				if (strncasecmp("text/plain", envelope.message.properties.content_type.bytes, strlen("text/plain")) == 0) {
-					commandFormat = COMMAND_FORMAT_PLAINTEXT;
-				} else {
-					commandFormat = COMMAND_FORMAT_UNKNOWN;
-				}
-			}
-
-			if (envelope.message.properties.headers.num_entries) {
-				int x = 0;
-
-				for ( x = 0; x < envelope.message.properties.headers.num_entries; x++) {
-					char *header_key = (char *)envelope.message.properties.headers.entries[x].key.bytes;
-					char *header_value = (char *)envelope.message.properties.headers.entries[x].value.value.bytes.bytes;
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "AMQP message custom header key[%s] value[%s]\n", header_key, header_value);
-
-					if ( !strncmp(header_key, "x-fs-api-resp-exchange", 22)) {
-						fs_resp_exchange = header_value;
-					} else if (!strncmp(header_key, "x-fs-api-resp-key", 17)) {
-						fs_resp_key = header_value;
-					} else {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Ignoring unrecognized event header [%s]\n", header_key);
+					if (nodename_obj && nodename_obj->valuestring) {
+						nodename_str = nodename_obj->valuestring;
+						if (zstr_buf(nodename_str) || strcmp(nodename_str, nodename)) {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Received %s for %s ignore\n",
+									  last_field, nodename_str);
+							continue;
+						}
 					}
-				}
-			}
-
-			if (commandFormat == COMMAND_FORMAT_PLAINTEXT) {
-				switch_stream_handle_t stream = { 0 }; /* Collects the command output */
-
-				/* Convert amqp bytes to c-string */
-				snprintf(command, sizeof(command), "%.*s", (int) envelope.message.body.len, (char *) envelope.message.body.bytes);
-
-				/* Execute the command */
-				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Executing: %s\n", command);
-
-				SWITCH_STANDARD_STREAM(stream);
-
-				if ( fs_resp_exchange && fs_resp_key ) {
-					switch_status_t status = switch_console_execute(command, 0, &stream);
-					mod_amqp_command_response(profile, command, stream, fs_resp_exchange, fs_resp_key, status);
-				} else {
-					if (switch_console_execute(command, 0, &stream) != SWITCH_STATUS_SUCCESS) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Remote command failed:\n%s\n", (char *) stream.data);
+					if (cmd_obj && cmd_obj->valuestring) {
+						const char *cmd = cmd_obj->valuestring;
+						const char *args = (args_obj && args_obj->valuestring) ? args_obj->valuestring : "";
+						execute_command(cmd, args, profile->props, session, profile->conn_active->state,
+										1, // channel
+										reply_to, correlation_id);
 					} else {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Remote command succeeded:\n%s\n", (char *) stream.data);
+						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+										  "Received AMQP command with missing 'command' field\n");
 					}
-				}
-				switch_safe_free(stream.data);
-			}
+					cJSON_Delete(command);
+				} else if (!strcmp(last_field, "ping")) {
+					cJSON *nodename_obj = cJSON_GetObjectItem(command, "Switch-Nodename");
+					const char *nodename_str;
+					if (nodename_obj && nodename_obj->valuestring) {
+						nodename_str = nodename_obj->valuestring;
+						if (zstr_buf(nodename_str) || strcmp(nodename_str, nodename)) {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Received ping for %s ignore\n",
+									  nodename_str);
+							continue;
+						}
+					}
+					pong(profile->props, session, profile->conn_active->state,
+						 1, // channel
+						 reply_to, correlation_id);
+				} else if (!strcmp(last_field, "sendmsg")) {
+					cJSON *uuid_obj = cJSON_GetObjectItem(command, "UUID");
+					cJSON *headers_obj = cJSON_GetObjectItem(command, "FSHeaders");
+					cJSON *nodename_obj = cJSON_GetObjectItem(command, "Switch-Nodename");
+					const char *uuid_str;
+					const char *nodename_str;
 
-			/* Tidy up */
+					if (uuid_obj && uuid_obj->valuestring) {
+						uuid_str = uuid_obj->valuestring;
+						if (zstr_buf(uuid_str) || !(session = switch_core_session_locate(uuid_str))) {
+							response_baduuid(profile->props, session, profile->conn_active->state,
+						 							1, // channel
+						 							reply_to, correlation_id);
+							goto err;
+						}
+					}
+
+					if (nodename_obj && nodename_obj->valuestring) {
+						nodename_str = nodename_obj->valuestring;
+						if (zstr_buf(nodename_str) || strcmp(nodename_str, nodename)) {
+							switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Received sendcmd for %s ignore\n",
+									  nodename_str);
+							continue;
+						}
+					}
+
+					switch_event_create(&event, SWITCH_EVENT_SEND_MESSAGE);
+					if (build_event(event, headers_obj) == SWITCH_STATUS_SUCCESS) {
+						switch_core_session_queue_private_event(session, &event, SWITCH_FALSE);
+						switch_core_session_rwunlock(session);
+						response_ok(profile->props, session, profile->conn_active->state,
+									1, // channel
+									reply_to, correlation_id);
+					} else {
+						response_badarg(profile->props, session, profile->conn_active->state,
+									1, // channel
+									reply_to, correlation_id);
+						switch_core_session_rwunlock(session);
+						goto err;
+
+					}
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Received Unknown AMQP command %s\n",
+									  last_field);
+				}
+			}
+err:
+			switch_safe_free(routing_key);
+			switch_safe_free(message);
 			amqp_destroy_envelope(&envelope);
 		}
-
-		amqp_bytes_free(queueName);
-		queueName.bytes = NULL;
-
-		mod_amqp_connection_close(profile->conn_active);
-		profile->conn_active = NULL;
-
-		if (profile->running) {
-			/* We'll reconnect, but sleep to avoid hammering resources */
-			switch_sleep(500);
-		}
 	}
-
-	/* Terminate the thread */
-	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Command listener thread stopped\n");
-	switch_thread_exit(thread, SWITCH_STATUS_SUCCESS);
+	amqp_bytes_free(queueName);
 	return NULL;
 }
 
+switch_status_t mod_amqp_command_create(char *name, switch_xml_t cfg)
+{
+	mod_amqp_command_profile_t *profile;
+	int arg = 0, i = 0;
+
+	switch_memory_pool_t *pool;
+	char *exchange = NULL, *exchange_type = NULL, *content_type = NULL, *binding_key = NULL;
+	int exchange_durable = 1; /* durable */
+	int delivery_mode = -1;
+	int delivery_timestamp = 1;
+
+	switch_xml_t params, param, connections, connection, props, prop;
+
+	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) { goto err; }
+	profile = switch_core_alloc(pool, sizeof(mod_amqp_command_profile_t));
+
+	profile = switch_core_alloc(pool, sizeof(mod_amqp_xml_fetch_profile_t));
+	profile->pool = pool;
+	profile->name = switch_core_strdup(profile->pool, name);
+	profile->running = 1;
+
+	profile->conn_root = NULL;
+	profile->conn_active = NULL;
+
+	if ((params = switch_xml_child(cfg, "params")) != NULL) {
+		for (param = switch_xml_child(params, "param"); param; param = param->next) {
+			char *var = (char *)switch_xml_attr_soft(param, "name");
+			char *val = (char *)switch_xml_attr_soft(param, "value");
+
+			if (!var) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] param missing 'name' attribute\n",
+								  profile->name);
+				continue;
+			}
+
+			if (!val) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT,
+								  "Profile[%s] param[%s] missing 'value' attribute\n", profile->name, var);
+				continue;
+			}
+
+			if (!strncmp(var, "reconnect_interval_ms", 21)) {
+				int interval = atoi(val);
+				if (interval && interval > 0) { profile->reconnect_interval_ms = interval; }
+			} else if (!strncmp(var, "exchange-type", 13)) {
+				exchange_type = switch_core_strdup(profile->pool, val);
+			} else if (!strncmp(var, "exchange-name", 13)) {
+				exchange = switch_core_strdup(profile->pool, val);
+			} else if (!strncmp(var, "binding-key", 11)) {
+				binding_key = switch_core_strdup(profile->pool, val);
+			} else if (!strncmp(var, "exchange-durable", 16)) {
+				exchange_durable = switch_true(val);
+			} else if (!strncmp(var, "delivery-mode", 13)) {
+				delivery_mode = atoi(val);
+			} else if (!strncmp(var, "delivery-timestamp", 18)) {
+				delivery_timestamp = switch_true(val);
+			} else if (!strncmp(var, "exchange_type", 13)) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+								  "Found exchange_type parameter. please change to exchange-type\n");
+			} else if (!strncmp(var, "exchange", 8)) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+								  "Found exchange parameter. please change to exchange-name\n");
+			} else if (!strncmp(var, "content-type", 12)) {
+				content_type = switch_core_strdup(profile->pool, val);
+			}
+		}
+	}
+
+	/* Handle defaults of string types */
+	profile->exchange = exchange ? exchange : switch_core_strdup(profile->pool, "TAP.Commands");
+	profile->exchange_type = exchange_type ? exchange_type : switch_core_strdup(profile->pool, "topic");
+	profile->exchange_durable = exchange_durable;
+	profile->binding_key = binding_key ? binding_key : switch_core_strdup(profile->pool, "commandBindingKey");
+	profile->delivery_mode = delivery_mode;
+	profile->delivery_timestamp = delivery_timestamp;
+	profile->content_type =
+		content_type ? content_type : switch_core_strdup(profile->pool, MOD_AMQP_DEFAULT_CONTENT_TYPE);
+
+	if ((connections = switch_xml_child(cfg, "connections")) != NULL) {
+		for (connection = switch_xml_child(connections, "connection"); connection; connection = connection->next) {
+			if (!profile->conn_root) {
+				if (mod_amqp_connection_create(&(profile->conn_root), connection, profile->pool) !=
+					SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+									  "Profile[%s] failed to create connection\n", profile->name);
+					continue;
+				}
+				profile->conn_active = profile->conn_root;
+			} else {
+				if (mod_amqp_connection_create(&(profile->conn_active->next), connection, profile->pool) !=
+					SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+									  "Profile[%s] failed to create connection\n", profile->name);
+					continue;
+				}
+				profile->conn_active = profile->conn_active->next;
+			}
+		}
+	}
+
+	if ((props = switch_xml_child(cfg, "props")) != NULL) {
+		for (prop = switch_xml_child(props, "prop"); prop; prop = prop->next) {
+			char *var = (char *)switch_xml_attr_soft(prop, "name");
+			char *val = (char *)switch_xml_attr_soft(prop, "value");
+			int len = strlen(var) + strlen(val) + 2;
+			profile->props.prop[profile->props.size] = switch_core_alloc(pool, len);
+			switch_snprintf(profile->props.prop[profile->props.size], len, "%s=%s", var, val);
+			/* increment size because the count returned the number of separators, not number of fields */
+			profile->props.size++;
+			profile->props.prop[profile->props.size] = NULL;
+		}
+	}
+
+	// Start command processing thread
+	profile->command_thread = switch_core_alloc(pool, sizeof(switch_thread_t *));
+	{
+		switch_threadattr_t *thd_attr;
+		switch_threadattr_create(&thd_attr, pool);
+		switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+		switch_thread_create(&profile->command_thread, thd_attr, command_thread, profile, pool);
+	}
+
+	switch_core_hash_insert(mod_amqp_globals.command_hash, name, profile);
+
+	return SWITCH_STATUS_SUCCESS;
+err:
+	mod_amqp_command_destroy(&profile);
+	return SWITCH_STATUS_GENERR;
+}
+
+switch_status_t mod_amqp_command_destroy(mod_amqp_command_profile_t **profile)
+{
+	mod_amqp_command_profile_t *p = *profile;
+	switch_status_t status;
+
+	if (p) {
+		p->running = SWITCH_FALSE;
+		if (p->command_thread) { switch_thread_join(&status, p->command_thread); }
+
+		if (p->pool) { switch_core_destroy_memory_pool(&p->pool); }
+
+		*profile = NULL;
+	}
+
+	return SWITCH_STATUS_SUCCESS;
+}
+
+// Function to process values, handling literals and lookup, and concatenating on comma
+void process_value(const char *input, char *output, size_t output_size)
+{
+	char temp[256];
+	char *token;
+
+	// Properly initialize 'temp' with 'input' before using strtok
+	strncpy(temp, input, sizeof(temp) - 1);
+	temp[sizeof(temp) - 1] = '\0'; // Ensure null termination
+
+	token = strtok(temp, ","); // Now safe to tokenize
+	output[0] = '\0';		   // Initialize output as empty
+
+	while (token) {
+		char processed_part[128];
+
+		if (token[0] == '#') {
+			strcpy(processed_part, token + 1); // Strip '#' and use as is
+		} else {
+			strncpy(processed_part, lookup_value(token), sizeof(processed_part) - 1);
+			processed_part[sizeof(processed_part) - 1] = '\0';
+		}
+
+		// Append processed part to output safely
+		if (output[0] != '\0') {
+			strncat(output, processed_part, output_size - strlen(output) - 1);
+		} else {
+			strncpy(output, processed_part, output_size - 1);
+			output[output_size - 1] = '\0';
+		}
+
+		token = strtok(NULL, ",");
+	}
+}
+
+// Mock lookup function (Replace this with actual lookup logic)
+const char *lookup_value(const char *key)
+{
+	if (strcmp(key, "AMQP-HOSTNAME") == 0) return mod_amqp_globals.hostname;
+	return "unknown"; // Default if not found
+}
+
+SWITCH_MOD_DECLARE(switch_status_t) mod_amqp_command_load(void) { return SWITCH_STATUS_SUCCESS; }
 
 /* For Emacs:
  * Local Variables:

@@ -1,40 +1,40 @@
 /*
-* FreeSWITCH Modular Media Switching Software Library / Soft-Switch Application
-* Copyright (C) 2005-2012, Anthony Minessale II <anthm@freeswitch.org>
-*
-* Version: MPL 1.1
-*
-* The contents of this file are subject to the Mozilla Public License Version
-* 1.1 (the "License"); you may not use this file except in compliance with
-* the License. You may obtain a copy of the License at
-* http://www.mozilla.org/MPL/
-*
-* Software distributed under the License is distributed on an "AS IS" basis,
-* WITHOUT WARRANTY OF ANY KIND, either express or implied. See the License
-* for the specific language governing rights and limitations under the
-* License.
-*
-* The Original Code is FreeSWITCH Modular Media Switching Software Library / Soft-Switch Application
-*
-* The Initial Developer of the Original Code is
-* Anthony Minessale II <anthm@freeswitch.org>
-* Portions created by the Initial Developer are Copyright (C)
-* the Initial Developer. All Rights Reserved.
-*
-* Based on mod_skel by
-* Anthony Minessale II <anthm@freeswitch.org>
-*
-* Contributor(s):
-*
-* Daniel Bryars <danb@aeriandi.com>
-* Tim Brown <tim.brown@aeriandi.com>
-* Anthony Minessale II <anthm@freeswitch.org>
-* William King <william.king@quentustech.com>
-* Mike Jerris <mike@jerris.com>
-*
-* mod_amqp.c -- Sends FreeSWITCH events to an AMQP broker
-*
-*/
+ * FreeSWITCH Modular Media Switching Software Library / Soft-Switch Application
+ * Copyright (C) 2005-2012, Anthony Minessale II <anthm@freeswitch.org>
+ *
+ * Version: MPL 1.1
+ *
+ * The contents of this file are subject to the Mozilla Public License Version
+ * 1.1 (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ * http://www.mozilla.org/MPL/
+ *
+ * Software distributed under the License is distributed on an "AS IS" basis,
+ * WITHOUT WARRANTY OF ANY KIND, either express or implied. See the License
+ * for the specific language governing rights and limitations under the
+ * License.
+ *
+ * The Original Code is FreeSWITCH Modular Media Switching Software Library / Soft-Switch Application
+ *
+ * The Initial Developer of the Original Code is
+ * Anthony Minessale II <anthm@freeswitch.org>
+ * Portions created by the Initial Developer are Copyright (C)
+ * the Initial Developer. All Rights Reserved.
+ *
+ * Based on mod_skel by
+ * Anthony Minessale II <anthm@freeswitch.org>
+ *
+ * Contributor(s):
+ *
+ * Daniel Bryars <danb@aeriandi.com>
+ * Tim Brown <tim.brown@aeriandi.com>
+ * Anthony Minessale II <anthm@freeswitch.org>
+ * William King <william.king@quentustech.com>
+ * Mike Jerris <mike@jerris.com>
+ *
+ * mod_amqp.c -- Sends FreeSWITCH events to an AMQP broker
+ *
+ */
 
 #include "mod_amqp.h"
 
@@ -49,38 +49,40 @@ int mod_amqp_log_if_amqp_error(amqp_rpc_reply_t x, char const *context)
 		break;
 
 	case AMQP_RESPONSE_LIBRARY_EXCEPTION:
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "%s: %s\n", context, amqp_error_string2(x.library_error));
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "%s: %s\n", context,
+						  amqp_error_string2(x.library_error));
 		break;
 
 	case AMQP_RESPONSE_SERVER_EXCEPTION:
 		switch (x.reply.id) {
 		case AMQP_CONNECTION_CLOSE_METHOD: {
-			amqp_connection_close_t *m = (amqp_connection_close_t *) x.reply.decoded;
+			amqp_connection_close_t *m = (amqp_connection_close_t *)x.reply.decoded;
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "%s: server connection error %d, message: %.*s\n",
-							  context, m->reply_code, (int) m->reply_text.len, (char *) m->reply_text.bytes);
+							  context, m->reply_code, (int)m->reply_text.len, (char *)m->reply_text.bytes);
 			break;
 		}
 		case AMQP_CHANNEL_CLOSE_METHOD: {
-			amqp_channel_close_t *m = (amqp_channel_close_t *) x.reply.decoded;
+			amqp_channel_close_t *m = (amqp_channel_close_t *)x.reply.decoded;
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "%s: server channel error %d, message: %.*s\n",
-							  context, m->reply_code, (int) m->reply_text.len, (char *) m->reply_text.bytes);
+							  context, m->reply_code, (int)m->reply_text.len, (char *)m->reply_text.bytes);
 			break;
 		}
 		default:
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "%s: unknown server error, method id 0x%08X\n", context, x.reply.id);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "%s: unknown server error, method id 0x%08X\n",
+							  context, x.reply.id);
 			break;
 		}
 		break;
 
 	default:
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "%s: unknown reply_type: %d \n", context, x.reply_type);
-			break;
+		break;
 	}
 
 	return -1;
 }
 
-int mod_amqp_count_chars(const char* string, char ch)
+int mod_amqp_count_chars(const char *string, char ch)
 {
 	int c = 0;
 	while (*string) c += *(string++) == ch;
@@ -102,6 +104,7 @@ switch_status_t mod_amqp_do_config(switch_bool_t reload)
 		mod_amqp_producer_profile_t *producer;
 		mod_amqp_command_profile_t *command;
 		mod_amqp_logging_profile_t *logging;
+		mod_amqp_xml_fetch_profile_t *directory;
 
 		switch_event_unbind_callback(mod_amqp_producer_event_handler);
 
@@ -120,101 +123,141 @@ switch_status_t mod_amqp_do_config(switch_bool_t reload)
 			switch_core_hash_this(hi, NULL, NULL, (void **)&logging);
 			mod_amqp_logging_destroy(&logging);
 		}
+		
+		while ((hi = switch_core_hash_first_iter(mod_amqp_globals.directory_hash, hi))) {
+			switch_core_hash_this(hi, NULL, NULL, (void **)&directory);
+			mod_amqp_fetch_xml_destroy(&directory);
+		}
 	}
 
 	if ((profiles = switch_xml_child(cfg, "producers"))) {
 		if ((profile = switch_xml_child(profiles, "profile"))) {
-			for (; profile; profile = profile->next)	{
-				char *name = (char *) switch_xml_attr_soft(profile, "name");
+			for (; profile; profile = profile->next) {
+				char *name = (char *)switch_xml_attr_soft(profile, "name");
 
 				if (zstr(name)) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile. Check configs missing name attr\n");
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									  "Failed to load mod_amqp profile. Check configs missing name attr\n");
 					continue;
 				}
 
-				if ( mod_amqp_producer_create(name, profile) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile [%s]. Check configs\n", name);
+				if (mod_amqp_producer_create(name, profile) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									  "Failed to load mod_amqp profile [%s]. Check configs\n", name);
 				} else {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Loaded mod_amqp profile [%s] successfully\n", name);
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+									  "Loaded mod_amqp profile [%s] successfully\n", name);
 				}
 			}
 		} else {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to locate a profile for mod_amqp\n" );
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to locate a profile for mod_amqp\n");
 		}
 	} else {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unable to locate producers section for mod_amqp\n" );
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unable to locate producers section for mod_amqp\n");
 	}
 
 	if ((profiles = switch_xml_child(cfg, "commands"))) {
 		if ((profile = switch_xml_child(profiles, "profile"))) {
-			for (; profile; profile = profile->next)	{
-				char *name = (char *) switch_xml_attr_soft(profile, "name");
+			for (; profile; profile = profile->next) {
+				char *name = (char *)switch_xml_attr_soft(profile, "name");
 
 				if (zstr(name)) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile. Check configs missing name attr\n");
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									  "Failed to load mod_amqp profile. Check configs missing name attr\n");
 					continue;
 				}
 				name = switch_core_strdup(mod_amqp_globals.pool, name);
 
-				if ( mod_amqp_command_create(name, profile) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile [%s]. Check configs\n", name);
+				if (mod_amqp_command_create(name, profile) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									  "Failed to load mod_amqp profile [%s]. Check configs\n", name);
 				} else {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Loaded mod_amqp profile [%s] successfully\n", name);
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+									  "Loaded mod_amqp profile [%s] successfully\n", name);
 				}
 			}
 		} else {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to locate a profile for mod_amqp\n" );
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to locate a profile for mod_amqp\n");
 		}
 	} else {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unable to locate commands section for mod_amqp\n" );
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unable to locate commands section for mod_amqp\n");
 	}
 
 	if ((profiles = switch_xml_child(cfg, "logging"))) {
 		if ((profile = switch_xml_child(profiles, "profile"))) {
-			for (; profile; profile = profile->next)	{
-				char *name = (char *) switch_xml_attr_soft(profile, "name");
+			for (; profile; profile = profile->next) {
+				char *name = (char *)switch_xml_attr_soft(profile, "name");
 
 				if (zstr(name)) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile. Check configs missing name attr\n");
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									  "Failed to load mod_amqp profile. Check configs missing name attr\n");
 					continue;
 				}
 				name = switch_core_strdup(mod_amqp_globals.pool, name);
 
-				if ( mod_amqp_logging_create(name, profile) != SWITCH_STATUS_SUCCESS) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to load mod_amqp profile [%s]. Check configs\n", name);
+				if (mod_amqp_logging_create(name, profile) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									  "Failed to load mod_amqp profile [%s]. Check configs\n", name);
 				} else {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Loaded mod_amqp profile [%s] successfully\n", name);
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+									  "Loaded mod_amqp profile [%s] successfully\n", name);
 				}
 			}
 		} else {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to locate a profile for mod_amqp\n" );
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to locate a profile for mod_amqp\n");
 		}
 	} else {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unable to locate logging section for mod_amqp\n" );
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unable to locate logging section for mod_amqp\n");
 	}
+
+	if ((profiles = switch_xml_child(cfg, "fetchers"))) {
+		if ((profile = switch_xml_child(profiles, "profile"))) {
+			for (; profile; profile = profile->next) {
+				char *name = (char *)switch_xml_attr_soft(profile, "name");
+
+				if (zstr(name)) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									  "Failed to load mod_amqp profile. Check configs missing name attr\n");
+					continue;
+				}
+				name = switch_core_strdup(mod_amqp_globals.pool, name);
+
+				if (mod_amqp_fetch_xml_create(name, profile) != SWITCH_STATUS_SUCCESS) {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+									  "Failed to load mod_amqp profile [%s]. Check configs\n", name);
+				} else {
+					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+									  "Loaded mod_amqp profile [%s] successfully\n", name);
+				}
+			}
+		} else {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Unable to locate a profile for mod_amqp\n");
+		}
+	} else {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Unable to locate logging section for mod_amqp\n");
+	}
+
 
 	switch_xml_free(xml);
 	return SWITCH_STATUS_SUCCESS;
 }
 
+#define KEY_SAFE(C)                                                                                                    \
+	((C >= 'a' && C <= 'z') || (C >= 'A' && C <= 'Z') || (C >= '0' && C <= '9') || (C == '-' || C == '~' || C == '_'))
 
-#define KEY_SAFE(C) ((C >= 'a' && C <= 'z') || \
-					(C >= 'A' && C <= 'Z') || \
-					(C >= '0' && C <= '9') || \
-					(C == '-' || C == '~' || C == '_'))
-
-#define HI4(C) (C>>4)
+#define HI4(C) (C >> 4)
 #define LO4(C) (C & 0x0F)
 
-#define hexint(C) (C < 10?('0' + C):('A'+ C - 10))
+#define hexint(C) (C < 10 ? ('0' + C) : ('A' + C - 10))
 
-char *amqp_util_encode(char *key, char *dest) {
+char *amqp_util_encode(char *key, char *dest)
+{
 	char *p, *end;
- 	if ((strlen(key) == 1) && (key[0] == '#' || key[0] == '*')) {
- 		*dest++ = key[0];
+	if ((strlen(key) == 1) && (key[0] == '#' || key[0] == '*')) {
+		*dest++ = key[0];
 		*dest = '\0';
 		return dest;
-    }
+	}
 	for (p = key, end = key + strlen(key); p < end; p++) {
 		if (KEY_SAFE(*p)) {
 			*dest++ = *p;
@@ -240,7 +283,38 @@ void mod_amqp_util_msg_destroy(mod_amqp_message_t **msg)
 	switch_safe_free(*msg);
 }
 
+char *xml_section_to_string(switch_xml_section_t section) {
+	switch(section) {
+	case SWITCH_XML_SECTION_CONFIG:
+		return "configuration";
+	case SWITCH_XML_SECTION_DIRECTORY:
+		return "directory";
+	case SWITCH_XML_SECTION_DIALPLAN:
+		return "dialplan";
+	case SWITCH_XML_SECTION_CHATPLAN:
+		return "chatplan";
+	case SWITCH_XML_SECTION_CHANNELS:
+		return "channels";
+	case SWITCH_XML_SECTION_LANGUAGES:
+		return "languages";
+	default:
+		return "unknown";
+	}
+}
 
+void mod_amqp_set_hostname()
+{
+        if (mod_amqp_globals.hostname == NULL) {
+                char hostname[NODENAME_MAX];
+                memcpy(hostname, switch_core_get_hostname(), NODENAME_MAX);
+                mod_amqp_globals.hostname_ent = gethostbyname(hostname);
+                if(mod_amqp_globals.hostname_ent != NULL) {
+                        mod_amqp_globals.hostname = switch_core_strdup(mod_amqp_globals.pool, mod_amqp_globals.hostname_ent->h_name);
+                } else {
+                        mod_amqp_globals.hostname = switch_core_strdup(mod_amqp_globals.pool, hostname);
+                }
+        }
+}
 
 /* For Emacs:
  * Local Variables:

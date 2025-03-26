@@ -75,6 +75,9 @@ void mod_amqp_producer_event_handler(switch_event_t* evt)
 	switch_time_t now = switch_time_now();
 	switch_time_t reset_time;
 
+	//FIXME - needs a more general solution
+	char nodename[1024];
+
 	if (!profile) {
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Event without a profile %p %p\n", (void *)evt, (void *)evt->event_user_data);
 		return;
@@ -94,7 +97,8 @@ void mod_amqp_producer_event_handler(switch_event_t* evt)
 	}
 
 	switch_malloc(amqp_message, sizeof(mod_amqp_message_t));
-
+	sprintf(nodename, "freeswitch@%s", mod_amqp_globals.hostname);
+	switch_event_add_header_string(evt, SWITCH_STACK_BOTTOM, "Switch-Nodename", nodename);
 	switch_event_serialize_json(evt, &amqp_message->pjson);
 	mod_amqp_producer_routing_key(profile, amqp_message->routing_key, evt, profile->format_fields);
 
@@ -177,9 +181,7 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 
 	memset(format_fields, 0, (MAX_ROUTING_KEY_FORMAT_FIELDS + 1) * sizeof(char *));
 
-	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) {
-		goto err;
-	}
+	if (switch_core_new_memory_pool(&pool) != SWITCH_STATUS_SUCCESS) { goto err; }
 
 	profile = switch_core_alloc(pool, sizeof(mod_amqp_producer_profile_t));
 	profile->pool = pool;
@@ -445,7 +447,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 	mod_amqp_producer_profile_t *profile = (mod_amqp_producer_profile_t *)data;
 	amqp_boolean_t passive = 0;
-	amqp_boolean_t durable = 1;
+//	amqp_boolean_t durable = 1;
 
 	while (profile->running) {
 
@@ -460,7 +462,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 									  amqp_cstring_bytes(profile->exchange),
 									  amqp_cstring_bytes(profile->exchange_type),
 									  passive,
-									  durable,
+									  profile->exchange_durable,
 									  profile->exchange_auto_delete,
 									  0,
 									  amqp_empty_table);
@@ -469,7 +471,7 @@ void * SWITCH_THREAD_FUNC mod_amqp_producer_thread(switch_thread_t *thread, void
 									  amqp_cstring_bytes(profile->exchange),
 									  amqp_cstring_bytes(profile->exchange_type),
 									  passive,
-									  durable,
+									  profile->exchange_durable,
 									  amqp_empty_table);
 #endif
 				if (!mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state), "Declaring exchange")) {
