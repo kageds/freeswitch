@@ -107,8 +107,8 @@ typedef struct {
 
 	char *exchange;
 	char *exchange_type;
-	int exchange_durable;
-	int exchange_auto_delete;
+	switch_bool_t exchange_durable;
+	switch_bool_t exchange_auto_delete;
 	int delivery_mode;
 	int delivery_timestamp;
 	char *content_type;
@@ -148,8 +148,8 @@ typedef struct {
 
 	char *exchange;
 	char *exchange_type;
-	int exchange_durable;
-	int exchange_auto_delete;
+	switch_bool_t exchange_durable;
+	switch_bool_t exchange_auto_delete;
 	char *queue;
 	char *binding_key;
 	int delivery_mode;
@@ -157,11 +157,9 @@ typedef struct {
 	char *content_type;
 	mod_amqp_json_props_t props;
 
-	/* Queue properties */
-	switch_bool_t passive;
-	switch_bool_t durable;
-	switch_bool_t exclusive;
-	switch_bool_t auto_delete;
+	/* AMQP  Queue properties */
+	switch_bool_t queue_durable;
+	switch_bool_t queue_auto_delete;
 
 	/* Note: The AMQP channel is not reentrant this MUTEX serializes sending events. */
 	mod_amqp_connection_t *conn_root;
@@ -202,6 +200,63 @@ typedef struct {
 
 	switch_memory_pool_t *pool;
 } mod_amqp_logging_profile_t;
+
+
+
+/* mod_amqp_fetch_agent.c */
+struct fetch_handler_s {
+	struct fetch_handler_s *next;
+};
+
+typedef struct fetch_handler_s fetch_handler_t;
+struct xml_fetch_reply_s {
+	char uuid_str[SWITCH_UUID_FORMATTED_LENGTH + 1];
+	char *xml_str;
+	struct xml_fetch_reply_s *next;
+};
+typedef struct xml_fetch_reply_s xml_fetch_reply_t;
+
+// Add this structure definition before the function declarations
+typedef struct {
+	char *name;
+	
+	char *exchange;
+	char *exchange_type;
+	switch_bool_t exchange_auto_delete;
+	switch_bool_t exchange_durable;
+
+	char *routing_key;
+	char *reply_queue;
+	int reconnect_interval_ms;
+	int timeout;
+	int running;
+	int delivery_mode;
+	int delivery_timestamp;
+	char *content_type;
+	mod_amqp_keypart_t format_fields[MAX_ROUTING_KEY_FORMAT_FIELDS + 1];
+
+	/* AMQP Queue properties */
+	switch_bool_t queue_durable;
+	switch_bool_t queue_auto_delete;
+
+	mod_amqp_connection_t *conn_root;
+	mod_amqp_connection_t *conn_active;
+	amqp_channel_t channel;
+	switch_xml_section_t section;
+	switch_thread_t *fetch_xml_thread;
+	switch_queue_t *send_queue;
+	unsigned int send_queue_size;
+	switch_hash_t *pending_requests;
+	switch_mutex_t *requests_mutex;
+	switch_mutex_t *replies_mutex;
+	xml_fetch_reply_t *replies;
+	switch_thread_cond_t *new_reply;
+	switch_memory_pool_t *pool;
+	char *custom_attr;
+	int fetch_timeout;
+
+} mod_amqp_xml_fetch_profile_t;
+
 
 typedef struct mod_amqp_globals_s {
 	char *ip;
@@ -262,24 +317,13 @@ void *SWITCH_THREAD_FUNC mod_amqp_logging_thread(switch_thread_t *thread, void *
 
 /* fetch handlers */
 #define MODNAME "mod_amqp"
-#define BUNDLE "community"
-#define RELEASE "v1.5.0-1"
+#define BUNDLE "kageds"
+#define RELEASE "v0"
 #define VERSION "mod_amqp v0.0.1 kageds"
 
 typedef enum { LFLAG_RUNNING = (1 << 0) } event_flag_t;
 
-/* mod_amqp_fetch_agent.c */
-struct fetch_handler_s {
-	struct fetch_handler_s *next;
-};
 
-typedef struct fetch_handler_s fetch_handler_t;
-struct xml_fetch_reply_s {
-	char uuid_str[SWITCH_UUID_FORMATTED_LENGTH + 1];
-	char *xml_str;
-	struct xml_fetch_reply_s *next;
-};
-typedef struct xml_fetch_reply_s xml_fetch_reply_t;
 
 typedef struct xml_agent_s xml_agent_t;
 typedef xml_agent_t *xml_agent_ptr;
@@ -295,40 +339,7 @@ struct received_msg_s {
 };
 typedef struct received_msg_s received_msg_t;
 
-// Add this structure definition before the function declarations
-typedef struct {
-	char *name;
-	char *exchange;
-	char *exchange_type;
-	int exchange_auto_delete;
-	char *routing_key;
-	char *reply_queue;
-	int exchange_durable;
-	int reconnect_interval_ms;
-	int timeout;
-	int running;
-	int delivery_mode;
-	int delivery_timestamp;
-	char *content_type;
-	mod_amqp_keypart_t format_fields[MAX_ROUTING_KEY_FORMAT_FIELDS + 1];
 
-	mod_amqp_connection_t *conn_root;
-	mod_amqp_connection_t *conn_active;
-	amqp_channel_t channel;
-	switch_xml_section_t section;
-	switch_thread_t *fetch_xml_thread;
-	switch_queue_t *send_queue;
-	unsigned int send_queue_size;
-	switch_hash_t *pending_requests;
-	switch_mutex_t *requests_mutex;
-	switch_mutex_t *replies_mutex;
-	xml_fetch_reply_t *replies;
-	switch_thread_cond_t *new_reply;
-	switch_memory_pool_t *pool;
-	char *custom_attr;
-	int fetch_timeout;
-
-} mod_amqp_xml_fetch_profile_t;
 
 // Function declarations can now reference the type
 switch_xml_t mod_amqp_fetch_xml_section(const char *section, const char *tag_name, const char *key_name,

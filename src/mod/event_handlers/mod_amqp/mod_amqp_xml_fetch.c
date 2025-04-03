@@ -48,7 +48,7 @@ switch_xml_t mod_amqp_fetch_xml_section(const char *section, const char *tag_nam
 	mod_amqp_xml_fetch_profile_t *profile = (mod_amqp_xml_fetch_profile_t *)user_data;
 	const char *fetch_call_id;
 
-	//FIXME - needs a more general solution
+	// FIXME - needs a more general solution
 	char nodename[1024];
 
 	mod_amqp_message_t *msg;
@@ -67,7 +67,7 @@ switch_xml_t mod_amqp_fetch_xml_section(const char *section, const char *tag_nam
 		}
 	}
 
-	if(event == NULL) {
+	if (event == NULL) {
 		if (switch_event_create(&event, SWITCH_EVENT_GENERAL) != SWITCH_STATUS_SUCCESS) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "error creating event for fetch handler\n");
 			return xml;
@@ -213,16 +213,14 @@ switch_status_t mod_amqp_fetch_xml_connect(mod_amqp_xml_fetch_profile_t *profile
 		status = mod_amqp_connection_open(profile->conn_root, &(profile->conn_active), profile->name, NULL);
 		if (status == SWITCH_STATUS_SUCCESS) {
 
-
-
 #if AMQP_VERSION_MAJOR == 0 && AMQP_VERSION_MINOR >= 6
-                        amqp_exchange_declare(profile->conn_active->state, 1, amqp_cstring_bytes(profile->exchange),
-                                                                          amqp_cstring_bytes(profile->exchange_type), passive, profile->exchange_durable,
-                                                                          profile->exchange_auto_delete, 0, amqp_empty_table);
+			amqp_exchange_declare(profile->conn_active->state, 1, amqp_cstring_bytes(profile->exchange),
+								  amqp_cstring_bytes(profile->exchange_type), passive, profile->exchange_durable,
+								  profile->exchange_auto_delete, 0, amqp_empty_table);
 #else
-                        amqp_exchange_declare(profile->conn_active->state, 1, amqp_cstring_bytes(profile->exchange),
-                                                                          amqp_cstring_bytes(profile->exchange_type), passive, profile->exchange_durable,
-                                                                          amqp_empty_table);
+			amqp_exchange_declare(profile->conn_active->state, 1, amqp_cstring_bytes(profile->exchange),
+								  amqp_cstring_bytes(profile->exchange_type), passive, profile->exchange_durable,
+								  amqp_empty_table);
 #endif
 			if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state), "Declaring exchange")) {
 				mod_amqp_connection_close(profile->conn_active);
@@ -243,7 +241,8 @@ switch_status_t mod_amqp_fetch_xml_create(char *name, switch_xml_t cfg)
 	switch_xml_t params, param, connections, connection;
 	switch_threadattr_t *thd_attr = NULL;
 	char *exchange = NULL, *exchange_type = NULL, *content_type = NULL;
-	int exchange_durable = 1; /* durable */
+	switch_bool_t exchange_durable = FALSE, exchange_auto_delete = TRUE;
+	switch_bool_t queue_durable = FALSE, queue_auto_delete = TRUE;
 	int delivery_mode = -1;
 	int delivery_timestamp = 1;
 	switch_memory_pool_t *pool;
@@ -293,6 +292,12 @@ switch_status_t mod_amqp_fetch_xml_create(char *name, switch_xml_t cfg)
 				exchange = switch_core_strdup(profile->pool, val);
 			} else if (!strncmp(var, "exchange-durable", 16)) {
 				exchange_durable = switch_true(val);
+			} else if (!strncmp(var, "exchange-auto-delete", 20)) {
+				exchange_auto_delete = switch_true(val);
+			} else if (!strncmp(var, "queue-durable", 16)) {
+				queue_durable = switch_true(val);
+			} else if (!strncmp(var, "queue-auto-delete", 17)) {
+				queue_auto_delete = switch_true(val);
 			} else if (!strncmp(var, "delivery-mode", 13)) {
 				delivery_mode = atoi(val);
 			} else if (!strncmp(var, "delivery-timestamp", 18)) {
@@ -326,6 +331,9 @@ switch_status_t mod_amqp_fetch_xml_create(char *name, switch_xml_t cfg)
 	profile->exchange = exchange ? exchange : switch_core_strdup(profile->pool, "TAP.Directory");
 	profile->exchange_type = exchange_type ? exchange_type : switch_core_strdup(profile->pool, "topic");
 	profile->exchange_durable = exchange_durable;
+	profile->exchange_auto_delete = exchange_auto_delete;
+	profile->queue_durable = queue_durable;
+	profile->queue_auto_delete = queue_auto_delete;
 	profile->delivery_mode = delivery_mode;
 	profile->delivery_timestamp = delivery_timestamp;
 	profile->reply_queue = switch_core_strdup(profile->pool, "directory.reply");
@@ -408,9 +416,8 @@ void *SWITCH_THREAD_FUNC mod_amqp_fetch_xml_thread(switch_thread_t *thread, void
 	mod_amqp_message_t *msg = NULL;
 	switch_status_t status = SWITCH_STATUS_SUCCESS;
 	mod_amqp_xml_fetch_profile_t *profile = (mod_amqp_xml_fetch_profile_t *)data;
-	amqp_boolean_t passive = 0;
 	amqp_bytes_t queuename;
-	amqp_queue_declare_ok_t *queue;
+	amqp_queue_declare_ok_t *recv_queue;
 	struct timeval timeout = {0, 100000}; // 100ms timeout
 	amqp_envelope_t envelope;
 	amqp_rpc_reply_t result;
@@ -419,83 +426,103 @@ void *SWITCH_THREAD_FUNC mod_amqp_fetch_xml_thread(switch_thread_t *thread, void
 	cJSON *json;
 
 	while (profile->running) {
-		if (!profile->conn_active) {
+		/* Ensure we have an AMQP connection */ 
+		if (!profile->conn_active || !profile->conn_active->state) {
 			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "AMQP no connection - reconnecting...\n");
 
 			status = mod_amqp_connection_open(profile->conn_root, &(profile->conn_active), profile->name,
 											  profile->custom_attr);
-			if (status == SWITCH_STATUS_SUCCESS) {
-				// Ensure that the exchange exists, and is of the correct type
+			if (status != SWITCH_STATUS_SUCCESS) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+								  "Profile[%s] failed to connect with code(%d), sleeping for %dms\n", profile->name,
+								  status, profile->reconnect_interval_ms);
+				switch_sleep(profile->reconnect_interval_ms * 1000);
+				continue;
+			}
+			// Ensure that the exchange exists, and is of the correct type
 #if AMQP_VERSION_MAJOR == 0 && AMQP_VERSION_MINOR >= 6
-				amqp_exchange_declare(profile->conn_active->state, 1, amqp_cstring_bytes(profile->exchange),
-									  amqp_cstring_bytes(profile->exchange_type), passive, profile->exchange_durable,
-									  profile->exchange_auto_delete, 0, amqp_empty_table);
+			amqp_exchange_declare(profile->conn_active->state, 1,
+								  amqp_cstring_bytes(profile->exchange), amqp_cstring_bytes(profile->exchange_type),
+								  0,  /* passive */
+								  profile->exchange_durable,
+								  profile->exchange_auto_delete,
+								  0,
+								  amqp_empty_table);
 #else
-				amqp_exchange_declare(profile->conn_active->state, 1, amqp_cstring_bytes(profile->exchange),
-									  amqp_cstring_bytes(profile->exchange_type), passive, profile->exchange_durable,
-									  amqp_empty_table);
+			amqp_exchange_declare(profile->conn_active->state, 1, amqp_cstring_bytes(profile->exchange),
+								  amqp_cstring_bytes(profile->exchange_type), passive, profile->exchange_durable,
+								  amqp_empty_table);
 #endif
-				if (!mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state),
-												"Declaring exchange")) {
-					switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "AMQP reconnect successful - connected\n");
-
-					// Declare queue
-					queue = amqp_queue_declare(profile->conn_active->state,
-											   1,								  // channel
-											   amqp_cstring_bytes(profile->name), // use profile name as queue name
-											   0,								  // passive
-											   profile->exchange_durable,		  // durable
-											   0,								  // exclusive
-											   0,								  // auto-delete
-											   amqp_empty_table);
-
-					if (!queue) {
-						switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Failed to declare queue\n");
-						return NULL;
-					}
-
-					queuename = amqp_bytes_malloc_dup(queue->queue);
-
-					// Bind queue to exchange if exchange is specified
-					if (profile->exchange) {
-						amqp_queue_bind(profile->conn_active->state,
-										1, // channel
-										queuename, amqp_cstring_bytes(profile->exchange),
-										amqp_cstring_bytes("KAZOO.*.*.*"), // use profile name as routing key
-										amqp_empty_table);
-					}
-					continue;
-				}
+			if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state),
+											"Declaring exchange")) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+								  "Profile[%s] failed to create missing command exchange\n", profile->name);
+				continue;
+			}
+			/* Ensure we have a queue */
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Creating command queue\n");
+			recv_queue = amqp_queue_declare(profile->conn_active->state,
+										   1,								  // channel
+										   amqp_cstring_bytes(profile->name), // use profile name as queue name
+										   0,								  // passive
+										   profile->queue_durable,			  // durable
+										   0,								  // exclusive
+										   profile->queue_auto_delete,		  // auto-delete
+										   amqp_empty_table);
+			if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state), "Declaring queue\n")) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+								  "Profile[%s] failed to connect with code(%d), sleeping for %dms\n", profile->name,
+								  status, profile->reconnect_interval_ms);
+				switch_sleep(profile->reconnect_interval_ms * 1000);
+				continue;
 			}
 
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-							  "Profile[%s] failed to connect with code(%d), sleeping for %dms\n", profile->name, status,
-							  profile->reconnect_interval_ms);
-			switch_sleep(profile->reconnect_interval_ms * 1000);
+			queuename = amqp_bytes_malloc_dup(recv_queue->queue);
+			
+			if (!queuename.bytes) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Out of memory while copying queue name");
+				break;
+			}
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Created fetch queue %.*s\n", (int)queuename.len,
+							  (char *)queuename.bytes);
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Binding fetch queue to exchange %s\n",
+							  profile->exchange);
+
+			amqp_queue_bind(profile->conn_active->state,
+							1, // channel
+							queuename,
+							amqp_cstring_bytes(profile->exchange),
+							amqp_cstring_bytes("KAZOO.*.*.*"), // use profile name as routing key
+							amqp_empty_table);
+
+			if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state), "Binding queue")) {
+				mod_amqp_connection_close(profile->conn_active);
+				profile->conn_active = NULL;
+				switch_sleep(profile->reconnect_interval_ms * 1000);
+				continue;
+			}
+
+			// Start consuming
+			amqp_basic_consume(profile->conn_active->state,
+							   1, // channel
+							   queuename, amqp_empty_bytes,
+							   0, // no_local
+							   1, // no_ack
+							   0, // exclusive
+							   amqp_empty_table);
+
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Amqp reconnect successful- connected\n");
 			continue;
-		}
-
-		if (!profile->conn_active || !profile->conn_active->state) {
-			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "No active connection\n");
-			return NULL;
-		}
-
-		// Start consuming
-		amqp_basic_consume(profile->conn_active->state,
-						   1, // channel
-						   queuename, amqp_empty_bytes,
-						   0, // no_local
-						   1, // no_ack
-						   0, // exclusive
-						   amqp_empty_table);
+	}
 
 		amqp_maybe_release_buffers(profile->conn_active->state);
 
 		result = amqp_consume_message(profile->conn_active->state, &envelope, &timeout, 0);
 
 		if (result.reply_type == AMQP_RESPONSE_NORMAL) {
-			message = (char *)calloc(envelope.message.body.len + 1, sizeof(char));
-			memcpy(message, envelope.message.body.bytes, envelope.message.body.len);
+				switch_malloc(message, sizeof(char) * envelope.message.body.len + 1);
+				memcpy(message, envelope.message.body.bytes, envelope.message.body.len);
+				message[envelope.message.body.len] = '\0';
 
 			json = cJSON_Parse(message);
 			if (json) {
@@ -528,9 +555,9 @@ void *SWITCH_THREAD_FUNC mod_amqp_fetch_xml_thread(switch_thread_t *thread, void
 				cJSON_Delete(json);
 			}
 
-			free(message);
+			switch_safe_free(message);
 			amqp_destroy_envelope(&envelope);
-		}
+	}
 	}
 	amqp_bytes_free(queuename);
 
@@ -546,7 +573,7 @@ switch_status_t mod_amqp_fetch_xml_send(mod_amqp_xml_fetch_profile_t *profile, m
 	int status;
 	uint64_t timestamp;
 
-	if (!profile->conn_active) {
+	if (!profile->conn_active || !profile->conn_active->state) {
 		/* No connection, so we can not send the message. */
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] not active\n", profile->name);
 		return SWITCH_STATUS_NOT_INITALIZED;

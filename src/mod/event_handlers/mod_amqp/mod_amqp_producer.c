@@ -172,7 +172,9 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 	switch_xml_t params, param, connections, connection;
 	switch_threadattr_t *thd_attr = NULL;
 	char *exchange = NULL, *exchange_type = NULL, *content_type = NULL;
-	int exchange_durable = 1; /* durable */
+	
+	switch_bool_t exchange_durable = FALSE, exchange_auto_delete = TRUE;
+
 	int delivery_mode = -1;
 	int delivery_timestamp = 1;
 	switch_memory_pool_t *pool;
@@ -241,6 +243,8 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 				exchange = switch_core_strdup(profile->pool, val);
 			} else if (!strncmp(var, "exchange-durable", 16)) {
 				exchange_durable = switch_true(val);
+			} else if (!strncmp(var, "exchange-auto-delete", 20)) {
+				exchange_auto_delete = switch_true(val);
 			} else if (!strncmp(var, "delivery-mode", 13)) {
 				delivery_mode = atoi(val);
 			} else if (!strncmp(var, "delivery-timestamp", 18)) {
@@ -292,6 +296,7 @@ switch_status_t mod_amqp_producer_create(char *name, switch_xml_t cfg)
 	profile->exchange = exchange ? exchange : switch_core_strdup(profile->pool, "TAP.Events");
 	profile->exchange_type = exchange_type ? exchange_type : switch_core_strdup(profile->pool, "topic");
 	profile->exchange_durable = exchange_durable;
+	profile->exchange_auto_delete = exchange_auto_delete;
 	profile->delivery_mode = delivery_mode;
 	profile->delivery_timestamp = delivery_timestamp;
 	profile->content_type = content_type ? content_type : switch_core_strdup(profile->pool, MOD_AMQP_DEFAULT_CONTENT_TYPE);
@@ -388,7 +393,7 @@ switch_status_t mod_amqp_producer_send(mod_amqp_producer_profile_t *profile, mod
 	int status;
 	uint64_t timestamp;
 
-	if (! profile->conn_active) {
+	if (!profile->conn_active || !profile->conn_active->state) {
 		/* No connection, so we can not send the message. */
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] not active\n", profile->name);
 		return SWITCH_STATUS_NOT_INITALIZED;

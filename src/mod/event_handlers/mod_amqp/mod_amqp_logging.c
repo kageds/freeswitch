@@ -275,7 +275,7 @@ switch_status_t mod_amqp_logging_send(mod_amqp_logging_profile_t *profile, mod_a
 	amqp_basic_properties_t props;
 	int status;
 
-	if (! profile->conn_active) {
+	if (!profile->conn_active || !profile->conn_active->state) {
 		/* No connection, so we can not send the message. */
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_CRIT, "Profile[%s] not active\n", profile->name);
 		return SWITCH_STATUS_NOT_INITALIZED;
