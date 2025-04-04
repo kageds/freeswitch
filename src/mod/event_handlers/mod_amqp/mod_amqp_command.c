@@ -284,10 +284,8 @@ static void *SWITCH_THREAD_FUNC command_thread(switch_thread_t *thread, void *da
 
 			/* Check if exchange already exists */
 #if AMQP_VERSION_MAJOR == 0 && AMQP_VERSION_MINOR >= 6
-			amqp_exchange_declare(profile->conn_active->state,
-								  1,							 /* channel */
-								  amqp_cstring_bytes(profile->exchange), amqp_cstring_bytes("topic"),
-								  0, /* passive */
+			amqp_exchange_declare(profile->conn_active->state, 1,										 /* channel */
+								  amqp_cstring_bytes(profile->exchange), amqp_cstring_bytes("topic"), 0, /* passive */
 								  profile->exchange_durable,											 /* durable */
 								  profile->exchange_auto_delete, /* auto-delete */
 								  0,							 /* internal */
@@ -299,8 +297,7 @@ static void *SWITCH_THREAD_FUNC command_thread(switch_thread_t *thread, void *da
 								  amqp_empty_table);
 #endif
 
-			if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state),
-										   "Declaring exchange\n")) {
+			if (mod_amqp_log_if_amqp_error(amqp_get_rpc_reply(profile->conn_active->state), "Declaring exchange\n")) {
 				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
 								  "Profile[%s] failed to create missing command exchange\n", profile->name);
 				continue;
@@ -312,8 +309,7 @@ static void *SWITCH_THREAD_FUNC command_thread(switch_thread_t *thread, void *da
 											1,								   // channel
 											amqp_cstring_bytes(profile->name), // queue name
 											0,								   /* passive */
-											profile->queue_durable,
-											0,		   /* exclusive */
+											profile->queue_durable, 0,		   /* exclusive */
 											profile->queue_auto_delete,
 											amqp_empty_table); // args
 
@@ -367,13 +363,31 @@ static void *SWITCH_THREAD_FUNC command_thread(switch_thread_t *thread, void *da
 			continue;
 		}
 
-	
 		amqp_maybe_release_buffers(profile->conn_active->state);
 
 		result = amqp_consume_message(profile->conn_active->state, &envelope, &timeout, 0);
 
-		if (result.reply_type == AMQP_RESPONSE_NORMAL) {
+		switch (result.reply_type) {
+		case AMQP_RESPONSE_LIBRARY_EXCEPTION:
+			if (result.library_error == AMQP_STATUS_UNEXPECTED_STATE) {
+				/* Unexpected frame. Discard and continue. */
+				amqp_frame_t decoded_frame;
+				amqp_simple_wait_frame(profile->conn_active->state, &decoded_frame);
 
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unexpected state!\n");
+			}
+
+			if (result.library_error == AMQP_STATUS_SOCKET_ERROR ||
+				result.library_error == AMQP_STATUS_CONNECTION_CLOSED ||
+				result.library_error == AMQP_STATUS_TCP_ERROR) {
+				switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "A TCP error occurred. Reconnecting.\n");
+
+				mod_amqp_connection_close(profile->conn_active);
+				profile->conn_active = NULL;
+			}
+			break;
+
+		case AMQP_RESPONSE_NORMAL:
 			switch_malloc(routing_key, sizeof(char) * envelope.routing_key.len + 1);
 			memcpy(routing_key, envelope.routing_key.bytes, envelope.routing_key.len);
 			routing_key[envelope.routing_key.len] = '\0';
@@ -483,6 +497,9 @@ static void *SWITCH_THREAD_FUNC command_thread(switch_thread_t *thread, void *da
 			switch_safe_free(routing_key);
 			switch_safe_free(message);
 			amqp_destroy_envelope(&envelope);
+			break;
+		default:
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Unexpected AMQP Error: %d.\n", result.reply_type);
 		}
 	}
 	amqp_bytes_free(queuename);
