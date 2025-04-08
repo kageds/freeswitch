@@ -126,6 +126,8 @@ switch_xml_t mod_amqp_fetch_xml_section(const char *section, const char *tag_nam
 	switch_mutex_unlock(profile->replies_mutex);
 
 	if (msg) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "Send %s request %s XML (%s)\n", section,
+						  key_value, reply.uuid_str);
 		switch (mod_amqp_fetch_xml_send(profile, msg)) {
 		case SWITCH_STATUS_SUCCESS:
 			mod_amqp_util_msg_destroy(&msg);
