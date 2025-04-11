@@ -42,6 +42,7 @@
 
 const char *lookup_value(const char *key);
 void process_value(const char *input, char *output, size_t output_size);
+static void handle_event_notify(char *nodename, cJSON *command);
 
 static void add_props_headers(cJSON *response, mod_amqp_json_props_t json_props)
 {
@@ -448,6 +449,8 @@ static void *SWITCH_THREAD_FUNC command_thread(switch_thread_t *thread, void *da
 					pong(profile->props, session, profile->conn_active->state,
 						 1, // channel
 						 reply_to, correlation_id);
+				} else if (!strcmp(last_field, "NOTIFY")) {
+					handle_event_notify(nodename, command);
 				} else if (!strcmp(last_field, "sendmsg")) {
 					cJSON *uuid_obj = cJSON_GetObjectItem(command, "UUID");
 					cJSON *headers_obj = cJSON_GetObjectItem(command, "FSHeaders");
@@ -706,6 +709,30 @@ const char *lookup_value(const char *key)
 {
 	if (strcmp(key, "AMQP-HOSTNAME") == 0) return mod_amqp_globals.hostname;
 	return "unknown"; // Default if not found
+}
+
+static void handle_event_notify(char *nodename, cJSON *command)
+{
+	char event_name[1024];
+	char subclass_name[1024];
+	switch_event_types_t event_type;
+	switch_event_t *event = NULL;
+	const char *uuid_str;
+	const char *nodename_str;
+
+	cJSON *headers_obj = cJSON_GetObjectItem(command, "FSEvent-Headers");
+	cJSON *nodename_obj = cJSON_GetObjectItem(command, "Switch-Nodename");
+
+	if (nodename_obj && nodename_obj->valuestring) {
+		nodename_str = nodename_obj->valuestring;
+		if (zstr_buf(nodename_str) || strcmp(nodename_str, nodename)) {
+			switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "Received sendcmd for %s ignore\n", nodename_str);
+			return;
+		}
+
+		switch_event_create(&event, SWITCH_EVENT_NOTIFY);
+		if (build_event(event, headers_obj) == SWITCH_STATUS_SUCCESS) { switch_event_fire(&event); }
+	}
 }
 
 SWITCH_MOD_DECLARE(switch_status_t) mod_amqp_command_load(void) { return SWITCH_STATUS_SUCCESS; }
